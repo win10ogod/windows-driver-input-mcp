@@ -1,0 +1,22 @@
+[project]
+name = "windows-driver-input-mcp"
+version = "0.1.0"
+description = "Standalone MCP server for driver-level keyboard/mouse input on Windows using IbInputSimulator."
+authors = [ { name = "win10ogod", email = "jmes100010@gmail.com" } ]
+requires-python = ">=3.13"
+dependencies = [
+  "fastmcp>=2.8.1",
+  "click>=8.2.1",
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+
+[project.urls]
+homepage = "https://github.com/win10ogod/windows-driver-input-mcp"
+repository = "https://github.com/win10ogod/windows-driver-input-mcp"
+
+[project.scripts]
+windows-input-mcp = "input_driver_server.main:main"
+
+[tool.uv]
+dev-dependencies = []

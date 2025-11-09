@@ -1,0 +1,54 @@
+{
+  "dxt_version": "0.1",
+  "name": "Windows-Driver-Input-MCP",
+  "version": "0.1.0",
+  "description": "Dedicated MCP server for driver-level keyboard/mouse input on Windows (IbInputSimulator).",
+  "long_description": "This MCP server exposes strictly driver-level input tools backed by IbInputSimulator (DLL first, AHK optional). It avoids PyAutoGUI fallbacks to ensure OS-native injection for reliability across games, protected apps, and non-English layouts.",
+  "author": {
+    "name": "win10ogod",
+    "email": "jmes100010@gmail.com"
+  },
+  "homepage": "https://github.com/win10ogod/windows-driver-input-mcp",
+  "documentation": "https://github.com/win10ogod/windows-driver-input-mcp",
+  "icon": "../assets/logo.png",
+  "server": {
+    "type": "python",
+    "entry_point": "main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${__dirname}",
+        "run",
+        "main.py"
+      ],
+      "env": {
+        "WINDOWS_MCP_INPUT_BACKEND": "ibsim-dll",
+        "WINDOWS_MCP_INPUT_DRIVER": "AnyDriver",
+        "WINDOWS_MCP_RATE_MOVE_HZ": "120",
+        "WINDOWS_MCP_RATE_MAX_DELTA": "60",
+        "WINDOWS_MCP_RATE_SMOOTH": "0.0",
+        "WINDOWS_MCP_RATE_CPS": "8.0",
+        "WINDOWS_MCP_RATE_KPS": "12.0",
+        "WINDOWS_INPUT_LOG_LEVEL": "INFO"
+      }
+    }
+  },
+  "tools": [
+    { "name": "Input-Info", "description": "Return backend readiness and rate limiter settings" },
+    { "name": "Move-Tool", "description": "Move cursor to [x,y] with rate-limited stepping" },
+    { "name": "Click-Tool", "description": "Click at [x,y] using driver-level injection" },
+    { "name": "Drag-Tool", "description": "Drag from [x,y] to [x,y] using driver-level injection" },
+    { "name": "Type-Tool", "description": "Type text via driver-level injection: method=unicode|clipboard|vk" },
+    { "name": "Shortcut-Tool", "description": "Send a keyboard shortcut like 'ctrl+c' or 'win+r'" },
+    { "name": "Scroll-Tool", "description": "Scroll vertically or horizontally at optional [x,y] using driver/OS-level events" },
+    { "name": "Key-Tool", "description": "Press/hold/release a single key (supports WASD)" },
+    { "name": "Combo-Tool", "description": "Hold multiple keys together for duration (e.g., ['shift','w'])" },
+    { "name": "Input-RateLimiter-Config", "description": "Update move_hz/max_delta/smooth/cps/kps at runtime" }
+  ],
+  "tools_generated": true,
+  "compatibility": { "platforms": ["win32"] },
+  "keywords": ["windows", "automation", "mcp", "input", "driver"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/win10ogod/windows-driver-input-mcp" }
+}
