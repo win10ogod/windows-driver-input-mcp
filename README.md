@@ -1,4 +1,4 @@
-# Windows Driver Input MCP (Standalone)
+# Windows Driver Input MCP
 
 Standalone MCP server exposing driver-level keyboard/mouse tools via IbInputSimulator.
 
@@ -7,6 +7,7 @@ Standalone MCP server exposing driver-level keyboard/mouse tools via IbInputSimu
 - Supports Unicode text, WASD, combos, holds, and scroll
 
 Repository: https://github.com/win10ogod/windows-driver-input-mcp
+
 License: MIT
 
 ## Run
