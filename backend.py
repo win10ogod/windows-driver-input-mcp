@@ -224,17 +224,33 @@ class IBSimulatorAHKBackend(InputBackend):
         self._run(body)
 
     def send_text(self, text: str):
-        esc = text.replace('"', '""')
-        body = (
-            "try {\n"
-            "    IbSendMode(1)\n"
-            f"    Send(\"{{Text}}\" . \"{esc}\")\n"
-            "    IbSendMode(0)\n"
-            "} catch e {\n"
-            "    SendMode \"Input\"\n"
-            f"    Send(\"{{Text}}\" . \"{esc}\")\n"
-            "}"
-        )
+        # Send character by character with delay for reliability
+        # SetKeyDelay adds delay between key down and up
+        # Sleep adds delay between characters
+        body_parts = [
+            "try {",
+            "    IbSendMode(1)",
+            "    SetKeyDelay 3, 20",  # 3ms down-to-up, 20ms between keys
+        ]
+
+        for ch in text:
+            esc_ch = ch.replace('"', '""')
+            body_parts.append(f"    Send(\"{{Text}}\" . \"{esc_ch}\")")
+
+        body_parts.extend([
+            "    IbSendMode(0)",
+            "} catch e {",
+            "    SendMode \"Input\"",
+            "    SetKeyDelay 3, 20",
+        ])
+
+        for ch in text:
+            esc_ch = ch.replace('"', '""')
+            body_parts.append(f"    Send(\"{{Text}}\" . \"{esc_ch}\")")
+
+        body_parts.append("}")
+
+        body = "\n".join(body_parts)
         self._run(body)
 
     def hotkey(self, combo: str):
@@ -479,56 +495,76 @@ class IBSimulatorDLLBackend(InputBackend):
     def send_text(self, text: str):
         if not self._ready or not text:
             return
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort), ("dwFlags", ctypes.c_uint),
-                        ("time", ctypes.c_uint), ("dwExtraInfo", ctypes.c_ulonglong)]
-        class HARDWAREINPUT(ctypes.Structure):
-            _fields_ = [("uMsg", ctypes.c_uint), ("wParamL", ctypes.c_short), ("wParamH", ctypes.c_short)]
-        class MOUSEINPUT(ctypes.Structure):
-            _fields_ = [("dx", ctypes.c_long), ("dy", ctypes.c_long), ("mouseData", ctypes.c_uint),
-                        ("dwFlags", ctypes.c_uint), ("time", ctypes.c_uint), ("dwExtraInfo", ctypes.c_ulonglong)]
-        class INPUT_UNION(ctypes.Union):
-            _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT), ("hi", HARDWAREINPUT)]
-        class INPUT(ctypes.Structure):
-            _fields_ = [("type", ctypes.c_uint), ("union", INPUT_UNION)]
-        INPUT_KEYBOARD = 1
-        KEYEVENTF_UNICODE = 0x0004
-        KEYEVENTF_KEYUP = 0x0002
-        def _utf16le_units(s: str):
-            b = s.encode('utf-16-le', errors='surrogatepass')
-            for i in range(0, len(b), 2):
-                yield int.from_bytes(b[i:i+2], 'little')
-        events: list[INPUT] = []
-        for unit in _utf16le_units(text):
-            down = INPUT(); down.type = INPUT_KEYBOARD
-            down.union.ki = KEYBDINPUT(0, unit, KEYEVENTF_UNICODE, 0, 0)
-            up = INPUT(); up.type = INPUT_KEYBOARD
-            up.union.ki = KEYBDINPUT(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0)
-            events.extend([down, up])
-        arr_t = INPUT * len(events)
-        arr = arr_t(*events)
-        try:
-            sent = self._dll.IbSendInput(len(events), ctypes.byref(arr), ctypes.sizeof(INPUT))
-        except Exception:
-            sent = 0
-        if sent != len(events):
-            SHIFT = 0x10
-            for ch in text:
-                vkshort = self._user32.VkKeyScanW(ch)
-                if vkshort == -1:
-                    continue
-                vk = vkshort & 0xFF
-                mods = (vkshort >> 8) & 0xFF
-                try:
-                    if mods & 0x01: self._dll.IbSendKeybdDown(SHIFT)
-                    if mods & 0x02: self._dll.IbSendKeybdDown(0x11)
-                    if mods & 0x04: self._dll.IbSendKeybdDown(0x12)
-                    self._dll.IbSendKeybdDown(vk)
-                    self._dll.IbSendKeybdUp(vk)
-                finally:
-                    if mods & 0x04: self._dll.IbSendKeybdUp(0x12)
-                    if mods & 0x02: self._dll.IbSendKeybdUp(0x11)
-                    if mods & 0x01: self._dll.IbSendKeybdUp(SHIFT)
+        import time
+
+        # Increased delay to ensure proper character ordering
+        # 20ms is more reliable for preventing race conditions
+        char_delay = 0.020  # 20ms delay between characters
+        key_delay = 0.003   # 3ms between key down and up
+
+        if self._debug:
+            logger.info(f"[send_text] Starting to send {len(text)} characters: {repr(text)}")
+
+        # Use VK mode exclusively for reliability
+        # Unicode batch mode is disabled due to race condition issues
+        SHIFT = 0x10
+        CTRL = 0x11
+        ALT = 0x12
+
+        for idx, ch in enumerate(text):
+            if self._debug:
+                logger.info(f"[send_text] Character {idx}: {repr(ch)}")
+
+            vkshort = self._user32.VkKeyScanW(ch)
+            if vkshort == -1:
+                if self._debug:
+                    logger.warning(f"[send_text] VkKeyScanW failed for character: {repr(ch)}")
+                continue
+
+            vk = vkshort & 0xFF
+            mods = (vkshort >> 8) & 0xFF
+
+            try:
+                # Press modifiers
+                if mods & 0x01:
+                    self._dll.IbSendKeybdDown(SHIFT)
+                    time.sleep(0.001)
+                if mods & 0x02:
+                    self._dll.IbSendKeybdDown(CTRL)
+                    time.sleep(0.001)
+                if mods & 0x04:
+                    self._dll.IbSendKeybdDown(ALT)
+                    time.sleep(0.001)
+
+                # Press and release the key
+                self._dll.IbSendKeybdDown(vk)
+                time.sleep(key_delay)
+                self._dll.IbSendKeybdUp(vk)
+
+                # Release modifiers in reverse order
+                if mods & 0x04:
+                    time.sleep(0.001)
+                    self._dll.IbSendKeybdUp(ALT)
+                if mods & 0x02:
+                    time.sleep(0.001)
+                    self._dll.IbSendKeybdUp(CTRL)
+                if mods & 0x01:
+                    time.sleep(0.001)
+                    self._dll.IbSendKeybdUp(SHIFT)
+
+                # Wait before next character
+                time.sleep(char_delay)
+
+                if self._debug:
+                    logger.info(f"[send_text] Character {idx} sent successfully")
+
+            except Exception as e:
+                if self._debug:
+                    logger.error(f"[send_text] Error sending character {idx} ({repr(ch)}): {e}")
+                continue
+
+        if self._debug:
+            logger.info(f"[send_text] Completed sending all characters")
 
     def hotkey(self, combo: str):
         if not self._ready:
