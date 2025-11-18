@@ -62,25 +62,35 @@ def _backend_from_env() -> InputBackend:
     preferred = (os.getenv("WINDOWS_MCP_INPUT_BACKEND", "ibsim-dll") or "").lower()
     driver = os.getenv("WINDOWS_MCP_INPUT_DRIVER", "AnyDriver")
 
+    logger.info(f"Initializing input backend: {preferred}, driver: {driver}")
+
     if preferred in ("ibsim-dll", "ibsim"):
         be = IBSimulatorDLLBackend(driver=driver)
         if be.info().ready:
+            logger.info("DLL backend initialized successfully")
             return be
         # If DLL path is not ready and user explicitly set ibsim-dll, keep it strict
         if preferred == "ibsim-dll":
+            logger.error("IBSimulator DLL backend initialization failed")
             raise RuntimeError("IBSimulator DLL backend not ready. Check IbInputSimulator DLL files.")
         # Otherwise try AHK as a best-effort driver-level path
+        logger.info("DLL backend not ready, trying AHK backend...")
         ahk = IBSimulatorAHKBackend(driver=driver)
         if ahk.info().ready:
+            logger.info("AHK backend initialized successfully")
             return ahk
+        logger.error("No driver-level backend is ready")
         raise RuntimeError("No driver-level backend is ready (DLL/AHK).")
 
     if preferred == "ibsim-ahk":
         ahk = IBSimulatorAHKBackend(driver=driver)
         if ahk.info().ready:
+            logger.info("AHK backend initialized successfully")
             return ahk
+        logger.error("IBSimulator AHK backend initialization failed")
         raise RuntimeError("IBSimulator AHK backend not ready. Install AutoHotkey v2 and include files.")
 
+    logger.error(f"Unsupported backend type: {preferred}")
     raise RuntimeError(f"Unsupported WINDOWS_MCP_INPUT_BACKEND={preferred}. Use 'ibsim-dll' or 'ibsim-ahk'.")
 
 
@@ -331,6 +341,113 @@ def _coerce_wh(value) -> tuple[int, int]:
     raise ValueError("size must be [w,h] or {w,h}")
 
 
+# Common RECT structure to avoid duplication
+class RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def _enumerate_windows(
+    query: str | None = None,
+    only_visible: bool = True,
+    include_minimized: bool = True,
+    include_cloaked: bool = True,
+    limit: int | None = None,
+    parent_hwnd: int | None = None,
+) -> list[dict]:
+    """Common window enumeration logic shared by Windows-List and Windows-Select.
+
+    Returns a list of window info dictionaries with keys:
+    hwnd, pid, class, title, left, top, right, bottom, visible, minimized, cloaked
+    """
+    user32 = ctypes.windll.user32
+
+    EnumWindows = user32.EnumWindows
+    IsWindowVisible = user32.IsWindowVisible
+    IsIconic = user32.IsIconic
+    GetWindowTextLengthW = user32.GetWindowTextLengthW
+    GetWindowTextW = user32.GetWindowTextW
+    GetClassNameW = user32.GetClassNameW
+    GetWindowRect = user32.GetWindowRect
+    GetWindowThreadProcessId = user32.GetWindowThreadProcessId
+    EnumChildWindows = user32.EnumChildWindows
+
+    # DWM cloaking (occluded/hidden by OS)
+    cloaked_attr = 14  # DWMWA_CLOAKED
+    try:
+        dwmapi = ctypes.windll.dwmapi
+        DwmGetWindowAttribute = dwmapi.DwmGetWindowAttribute
+        def _is_cloaked(hwnd):
+            val = ctypes.c_int(0)
+            try:
+                DwmGetWindowAttribute(hwnd, cloaked_attr, ctypes.byref(val), ctypes.sizeof(val))
+                return bool(val.value)
+            except Exception:
+                return False
+    except Exception:
+        def _is_cloaked(hwnd):
+            return False
+
+    results: list[dict] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_void_p)
+    def _enum_proc(hwnd, lparam):
+        try:
+            visible = bool(IsWindowVisible(hwnd))
+            minimized = bool(IsIconic(hwnd))
+            cloaked = _is_cloaked(hwnd)
+            if only_visible and not visible:
+                return True
+            if minimized and not include_minimized:
+                return True
+            if cloaked and not include_cloaked:
+                return True
+            # Title
+            length = int(GetWindowTextLengthW(hwnd))
+            tbuf = ctypes.create_unicode_buffer(length + 1) if length > 0 else ctypes.create_unicode_buffer(1)
+            GetWindowTextW(hwnd, tbuf, len(tbuf))
+            title = tbuf.value
+            # Class
+            cbuf = ctypes.create_unicode_buffer(256)
+            GetClassNameW(hwnd, cbuf, 256)
+            cls = cbuf.value
+            # Rect
+            rc = RECT()
+            GetWindowRect(hwnd, ctypes.byref(rc))
+            # PID
+            pid = ctypes.c_ulong()
+            GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+            item = {
+                'hwnd': int(hwnd),
+                'pid': int(pid.value),
+                'class': cls,
+                'title': title,
+                'left': int(rc.left), 'top': int(rc.top), 'right': int(rc.right), 'bottom': int(rc.bottom),
+                'visible': visible,
+                'minimized': minimized,
+                'cloaked': cloaked,
+            }
+
+            q = (query or '').strip().lower()
+            if q:
+                if q not in (title or '').lower() and q not in (cls or '').lower() and q not in str(item['pid']):
+                    return True
+
+            results.append(item)
+            if limit is not None and len(results) >= int(limit):
+                return False  # stop enumeration
+        except Exception:
+            pass
+        return True
+
+    if parent_hwnd is not None and int(parent_hwnd) != 0:
+        EnumChildWindows(wintypes.HWND(int(parent_hwnd)), _enum_proc, 0)
+    else:
+        EnumWindows(_enum_proc, 0)
+
+    return results
+
+
 @mcp.tool(
     name="Input-Info",
     description="Return current backend info and rate limiter config."
@@ -387,8 +504,6 @@ def window_info() -> str:
     user32.GetClassNameW(hwnd, bufc, 256)
     cls = bufc.value
     # Rect
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
     rc = RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(rc))
     l, t, r, b = int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
@@ -452,9 +567,8 @@ def windows_activate(hwnd: int | str, show: str | None = None, topmost: bool | N
         )
 
     # Return final rect
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-    rc = RECT(); user32.GetWindowRect(wintypes.HWND(target), ctypes.byref(rc))
+    rc = RECT()
+    user32.GetWindowRect(wintypes.HWND(target), ctypes.byref(rc))
     l, t, r, b = int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
     w, h = r - l, b - t
     return f"Activate {'OK' if ok else 'TRY'} hwnd=0x{target:08X} rect=[{l},{t},{r},{b}] size=[{w},{h}] topmost={'on' if topmost else 'unchanged' if topmost is None else 'off'}"
@@ -504,9 +618,8 @@ def windows_setpos(
     flags |= SWP_SHOWWINDOW
     ok = bool(user32.SetWindowPos(wintypes.HWND(target), insert_after, int(x), int(y), int(w), int(h), int(flags)))
 
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-    rc = RECT(); user32.GetWindowRect(wintypes.HWND(target), ctypes.byref(rc))
+    rc = RECT()
+    user32.GetWindowRect(wintypes.HWND(target), ctypes.byref(rc))
     l, t, r, b = int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
     return f"SetPos {'OK' if ok else 'FAIL'} hwnd=0x{target:08X} rect=[{l},{t},{r},{b}]"
 
@@ -535,93 +648,7 @@ def windows_list(
     limit: int | None = None,
     parent_hwnd: int | None = None,
 ) -> str:
-    user32 = ctypes.windll.user32
-
-    EnumWindows = user32.EnumWindows
-    IsWindowVisible = user32.IsWindowVisible
-    IsIconic = user32.IsIconic
-    GetWindowTextLengthW = user32.GetWindowTextLengthW
-    GetWindowTextW = user32.GetWindowTextW
-    GetClassNameW = user32.GetClassNameW
-    GetWindowRect = user32.GetWindowRect
-    GetWindowThreadProcessId = user32.GetWindowThreadProcessId
-    EnumChildWindows = user32.EnumChildWindows
-
-    # DWM cloaking (occluded/hidden by OS)
-    cloaked_attr = 14  # DWMWA_CLOAKED
-    try:
-        dwmapi = ctypes.windll.dwmapi
-        DwmGetWindowAttribute = dwmapi.DwmGetWindowAttribute
-        def _is_cloaked(hwnd):
-            val = ctypes.c_int(0)
-            try:
-                DwmGetWindowAttribute(hwnd, cloaked_attr, ctypes.byref(val), ctypes.sizeof(val))
-                return bool(val.value)
-            except Exception:
-                return False
-    except Exception:
-        def _is_cloaked(hwnd):
-            return False
-
-    results: list[dict] = []
-
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_void_p)
-    def _enum_proc(hwnd, lparam):
-        try:
-            visible = bool(IsWindowVisible(hwnd))
-            minimized = bool(IsIconic(hwnd))
-            cloaked = _is_cloaked(hwnd)
-            if only_visible and not visible:
-                return True
-            if minimized and not include_minimized:
-                return True
-            if cloaked and not include_cloaked:
-                return True
-            # Title
-            length = int(GetWindowTextLengthW(hwnd))
-            tbuf = ctypes.create_unicode_buffer(length + 1) if length > 0 else ctypes.create_unicode_buffer(1)
-            GetWindowTextW(hwnd, tbuf, len(tbuf))
-            title = tbuf.value
-            # Class
-            cbuf = ctypes.create_unicode_buffer(256)
-            GetClassNameW(hwnd, cbuf, 256)
-            cls = cbuf.value
-            # Rect
-            class RECT(ctypes.Structure):
-                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-            rc = RECT()
-            GetWindowRect(hwnd, ctypes.byref(rc))
-            # PID
-            pid = ctypes.c_ulong()
-            GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-
-            item = {
-                'hwnd': int(hwnd),
-                'pid': int(pid.value),
-                'class': cls,
-                'title': title,
-                'left': int(rc.left), 'top': int(rc.top), 'right': int(rc.right), 'bottom': int(rc.bottom),
-                'visible': visible,
-                'minimized': minimized,
-                'cloaked': cloaked,
-            }
-
-            q = (query or '').strip().lower()
-            if q:
-                if q not in (title or '').lower() and q not in (cls or '').lower() and q not in str(item['pid']):
-                    return True
-
-            results.append(item)
-            if limit is not None and len(results) >= int(limit):
-                return False  # stop enumeration
-        except Exception:
-            pass
-        return True
-
-    if parent_hwnd is not None and int(parent_hwnd) != 0:
-        EnumChildWindows(wintypes.HWND(int(parent_hwnd)), _enum_proc, 0)
-    else:
-        EnumWindows(_enum_proc, 0)
+    results = _enumerate_windows(query, only_visible, include_minimized, include_cloaked, limit, parent_hwnd)
 
     lines = [
         "idx  hwnd        pid   V M C  class                title                          rect[l,t,r,b]  size[w,h]",
@@ -652,77 +679,7 @@ def windows_select(
     index: int | None = None,
     parent_hwnd: int | None = None,
 ) -> str:
-    user32 = ctypes.windll.user32
-
-    EnumWindows = user32.EnumWindows
-    IsWindowVisible = user32.IsWindowVisible
-    IsIconic = user32.IsIconic
-    GetWindowTextLengthW = user32.GetWindowTextLengthW
-    GetWindowTextW = user32.GetWindowTextW
-    GetClassNameW = user32.GetClassNameW
-    GetWindowRect = user32.GetWindowRect
-    GetWindowThreadProcessId = user32.GetWindowThreadProcessId
-    EnumChildWindows = user32.EnumChildWindows
-
-    # DWM cloaking
-    cloaked_attr = 14  # DWMWA_CLOAKED
-    try:
-        dwmapi = ctypes.windll.dwmapi
-        DwmGetWindowAttribute = dwmapi.DwmGetWindowAttribute
-        def _is_cloaked(hwnd):
-            val = ctypes.c_int(0)
-            try:
-                DwmGetWindowAttribute(hwnd, cloaked_attr, ctypes.byref(val), ctypes.sizeof(val))
-                return bool(val.value)
-            except Exception:
-                return False
-    except Exception:
-        def _is_cloaked(hwnd):
-            return False
-
-    results: list[dict] = []
-
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_void_p)
-    def _enum_proc(hwnd, lparam):
-        try:
-            visible = bool(IsWindowVisible(hwnd))
-            minimized = bool(IsIconic(hwnd))
-            cloaked = _is_cloaked(hwnd)
-            if only_visible and not visible:
-                return True
-            if minimized and not include_minimized:
-                return True
-            if cloaked and not include_cloaked:
-                return True
-            length = int(GetWindowTextLengthW(hwnd))
-            tbuf = ctypes.create_unicode_buffer(length + 1) if length > 0 else ctypes.create_unicode_buffer(1)
-            GetWindowTextW(hwnd, tbuf, len(tbuf))
-            title = tbuf.value
-            cbuf = ctypes.create_unicode_buffer(256)
-            GetClassNameW(hwnd, cbuf, 256)
-            cls = cbuf.value
-            class RECT(ctypes.Structure):
-                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-            rc = RECT(); GetWindowRect(hwnd, ctypes.byref(rc))
-            pid = ctypes.c_ulong(); GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            item = {
-                'hwnd': int(hwnd), 'pid': int(pid.value), 'class': cls, 'title': title,
-                'left': int(rc.left), 'top': int(rc.top), 'right': int(rc.right), 'bottom': int(rc.bottom),
-                'visible': visible, 'minimized': minimized, 'cloaked': cloaked,
-            }
-            q = (query or '').strip().lower()
-            if q:
-                if q not in (title or '').lower() and q not in (cls or '').lower() and q not in str(item['pid']):
-                    return True
-            results.append(item)
-        except Exception:
-            pass
-        return True
-
-    if parent_hwnd is not None and int(parent_hwnd) != 0:
-        EnumChildWindows(wintypes.HWND(int(parent_hwnd)), _enum_proc, 0)
-    else:
-        EnumWindows(_enum_proc, 0)
+    results = _enumerate_windows(query, only_visible, include_minimized, include_cloaked, limit=None, parent_hwnd=parent_hwnd)
 
     if not results:
         return "No windows matched."
@@ -748,20 +705,28 @@ def windows_select(
     description="Move cursor to coordinates. Format: to_loc=[x,y] or 'x,y'. Uses stepwise movement under rate limits."
 )
 def move_tool(to_loc: list[int] | dict | str) -> str:
-    tx, ty = _coerce_xy(to_loc)
-    # Step toward target using RateLimiter
-    for _ in range(3000):  # hard cap
-        cx, cy = _get_cursor_pos()
-        if (cx, cy) == (tx, ty):
-            break
-        nx, ny = rate.filter_target((cx, cy), (tx, ty))
-        rate.sleep_until_ready("move")
-        backend.move(nx, ny)
-        if (nx, ny) == (tx, ty):
-            # final snap if needed
-            backend.move(tx, ty)
-            break
-    return f"Moved to ({tx},{ty})."
+    try:
+        tx, ty = _coerce_xy(to_loc)
+        logger.debug(f"Moving cursor to ({tx},{ty})")
+        # Step toward target using RateLimiter
+        for _ in range(3000):  # hard cap
+            cx, cy = _get_cursor_pos()
+            if (cx, cy) == (tx, ty):
+                break
+            nx, ny = rate.filter_target((cx, cy), (tx, ty))
+            rate.sleep_until_ready("move")
+            backend.move(nx, ny)
+            if (nx, ny) == (tx, ty):
+                # final snap if needed
+                backend.move(tx, ty)
+                break
+        return f"Moved to ({tx},{ty})."
+    except ValueError as e:
+        logger.error(f"Invalid move location format: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Move operation failed: {e}")
+        raise
 
 
 @mcp.tool(
@@ -769,10 +734,19 @@ def move_tool(to_loc: list[int] | dict | str) -> str:
     description="Click at coordinates. Format: loc=[x,y], button='left|right|middle', clicks=int."
 )
 def click_tool(loc: list[int] | dict | str, button: Literal['left', 'right', 'middle'] = 'left', clicks: int = 1) -> str:
-    x, y = _coerce_xy(loc)
-    rate.sleep_until_ready("click")
-    backend.click(x, y, button=button, clicks=int(max(1, clicks)))
-    return f"{button} click x{int(max(1, clicks))} at ({x},{y})."
+    try:
+        x, y = _coerce_xy(loc)
+        num_clicks = int(max(1, clicks))
+        logger.debug(f"Clicking {button} button x{num_clicks} at ({x},{y})")
+        rate.sleep_until_ready("click")
+        backend.click(x, y, button=button, clicks=num_clicks)
+        return f"{button} click x{num_clicks} at ({x},{y})."
+    except ValueError as e:
+        logger.error(f"Invalid click location format: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Click operation failed: {e}")
+        raise
 
 
 @mcp.tool(
@@ -792,30 +766,37 @@ def drag_tool(from_loc: list[int] | dict | str, to_loc: list[int] | dict | str) 
 )
 def type_tool(text: str, method: Literal['unicode', 'clipboard', 'vk'] = 'unicode', press_enter: bool = False) -> str:
     if not isinstance(text, str):
+        logger.error("Type-Tool received non-string text")
         raise ValueError("text must be a string")
-    m = (method or 'unicode').lower()
-    if m == 'clipboard':
-        ok = _set_clipboard_text(text)
-        if not ok:
-            raise RuntimeError('Failed to set clipboard text')
-        rate.sleep_until_ready('key')
-        backend.hotkey('ctrl+v')
-    elif m == 'vk':
-        # Emit via key_down/up using keyboard mapping; safer for some games
-        for ch in text:
+    try:
+        m = (method or 'unicode').lower()
+        logger.debug(f"Typing {len(text)} characters via {m} method")
+        if m == 'clipboard':
+            ok = _set_clipboard_text(text)
+            if not ok:
+                logger.error("Failed to set clipboard text")
+                raise RuntimeError('Failed to set clipboard text')
             rate.sleep_until_ready('key')
-            backend.key_down(ch)
-            backend.key_up(ch)
-    else:
-        # Default unicode path - send entire text to backend
-        # Backend now handles character-by-character sending with proper delays
-        # No need to chunk here, backend.send_text has built-in delays
-        rate.sleep_until_ready('key')
-        backend.send_text(text)
-    if press_enter:
-        rate.sleep_until_ready('key')
-        backend.hotkey('enter')
-    return f"Typed {len(text)} chars via {m}."
+            backend.hotkey('ctrl+v')
+        elif m == 'vk':
+            # Emit via key_down/up using keyboard mapping; safer for some games
+            for ch in text:
+                rate.sleep_until_ready('key')
+                backend.key_down(ch)
+                backend.key_up(ch)
+        else:
+            # Default unicode path - send entire text to backend
+            # Backend now handles character-by-character sending with proper delays
+            # No need to chunk here, backend.send_text has built-in delays
+            rate.sleep_until_ready('key')
+            backend.send_text(text)
+        if press_enter:
+            rate.sleep_until_ready('key')
+            backend.hotkey('enter')
+        return f"Typed {len(text)} chars via {m}."
+    except Exception as e:
+        logger.error(f"Type operation failed: {e}")
+        raise
 
 
 @mcp.tool(
@@ -824,10 +805,16 @@ def type_tool(text: str, method: Literal['unicode', 'clipboard', 'vk'] = 'unicod
 )
 def shortcut_tool(shortcut: str) -> str:
     if not isinstance(shortcut, str) or not shortcut:
+        logger.error("Shortcut-Tool received invalid shortcut")
         raise ValueError("shortcut must be a non-empty string, e.g., 'ctrl+c'")
-    rate.sleep_until_ready("key")
-    backend.hotkey(shortcut)
-    return f"Shortcut sent: {shortcut}"
+    try:
+        logger.debug(f"Sending keyboard shortcut: {shortcut}")
+        rate.sleep_until_ready("key")
+        backend.hotkey(shortcut)
+        return f"Shortcut sent: {shortcut}"
+    except Exception as e:
+        logger.error(f"Shortcut operation failed: {e}")
+        raise
 
 
 @mcp.tool(
