@@ -375,7 +375,8 @@ class IBSimulatorDLLBackend(InputBackend):
         self._driver = driver
         self._debug = str(os.getenv('WINDOWS_MCP_INPUT_DEBUG', '0')).lower() in ('1','true','yes','on')
         # Configurable text input delays (in seconds)
-        self._char_delay = float(os.getenv('WINDOWS_MCP_CHAR_DELAY', '0.010'))  # 10ms default (was 20ms)
+        # Increased default to 15ms for better reliability with games, remote desktop, etc.
+        self._char_delay = float(os.getenv('WINDOWS_MCP_CHAR_DELAY', '0.015'))  # 15ms default
         self._key_delay = float(os.getenv('WINDOWS_MCP_KEY_DELAY', '0.003'))    # 3ms default
         dll_path = _ib_dll_path()
         self._dll_path = str(dll_path) if dll_path else ""
@@ -492,6 +493,22 @@ class IBSimulatorDLLBackend(InputBackend):
         except Exception as e:
             logger.error(f"Mouse drag failed: {e}")
 
+    def _release_all_modifiers(self):
+        """Release all modifier keys to prevent state pollution."""
+        if not self._ready:
+            return
+        try:
+            # Release common modifier keys to ensure clean state
+            # VK codes: Shift=0x10, Ctrl=0x11, Alt=0x12, LWin=0x5B, RWin=0x5C
+            modifier_vks = [0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5]
+            for vk in modifier_vks:
+                try:
+                    self._dll.IbSendKeybdUp(vk)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"Error releasing modifiers: {e}")
+
     def _vk_for_key(self, key: str) -> int | None:
         if not isinstance(key, str) or not key:
             return None
@@ -563,8 +580,12 @@ class IBSimulatorDLLBackend(InputBackend):
             return
         import time
 
+        # Release all modifier keys before starting to prevent state pollution
+        # This ensures user's currently pressed keys don't affect input
+        self._release_all_modifiers()
+
         # Use configurable delays for better performance
-        # Defaults: 10ms between chars, 3ms between key down/up
+        # Defaults: 15ms between chars, 3ms between key down/up
         char_delay = self._char_delay
         key_delay = self._key_delay
 
@@ -586,16 +607,24 @@ class IBSimulatorDLLBackend(InputBackend):
             vk = vkshort & 0xFF
             mods = (vkshort >> 8) & 0xFF
 
+            # Track which modifiers were pressed to ensure cleanup
+            shift_pressed = False
+            ctrl_pressed = False
+            alt_pressed = False
+
             try:
                 # Press modifiers
                 if mods & 0x01:
                     self._dll.IbSendKeybdDown(VK_SHIFT)
+                    shift_pressed = True
                     time.sleep(0.001)
                 if mods & 0x02:
                     self._dll.IbSendKeybdDown(VK_CTRL)
+                    ctrl_pressed = True
                     time.sleep(0.001)
                 if mods & 0x04:
                     self._dll.IbSendKeybdDown(VK_ALT)
+                    alt_pressed = True
                     time.sleep(0.001)
 
                 # Press and release the key
@@ -603,27 +632,35 @@ class IBSimulatorDLLBackend(InputBackend):
                 time.sleep(key_delay)
                 self._dll.IbSendKeybdUp(vk)
 
-                # Release modifiers in reverse order
-                if mods & 0x04:
-                    time.sleep(0.001)
-                    self._dll.IbSendKeybdUp(VK_ALT)
-                if mods & 0x02:
-                    time.sleep(0.001)
-                    self._dll.IbSendKeybdUp(VK_CTRL)
-                if mods & 0x01:
-                    time.sleep(0.001)
-                    self._dll.IbSendKeybdUp(VK_SHIFT)
-
-                # Wait before next character
-                time.sleep(char_delay)
-
                 if self._debug:
                     logger.info(f"[send_text] Character {idx} sent successfully")
 
             except Exception as e:
                 if self._debug:
                     logger.error(f"[send_text] Error sending character {idx} ({repr(ch)}): {e}")
-                continue
+            finally:
+                # Always release modifiers in reverse order, even on error
+                if alt_pressed:
+                    try:
+                        time.sleep(0.001)
+                        self._dll.IbSendKeybdUp(VK_ALT)
+                    except Exception:
+                        pass
+                if ctrl_pressed:
+                    try:
+                        time.sleep(0.001)
+                        self._dll.IbSendKeybdUp(VK_CTRL)
+                    except Exception:
+                        pass
+                if shift_pressed:
+                    try:
+                        time.sleep(0.001)
+                        self._dll.IbSendKeybdUp(VK_SHIFT)
+                    except Exception:
+                        pass
+
+                # Wait before next character
+                time.sleep(char_delay)
 
         if self._debug:
             logger.info(f"[send_text] Completed sending all characters")
