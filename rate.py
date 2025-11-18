@@ -18,6 +18,9 @@ class RateLimiter:
         self._last_click = 0.0
         self._last_key = 0.0
         self._last_move = 0.0
+        # Separate tracking for mouse and keyboard to prevent interference
+        self._mouse_active = False
+        self._keyboard_active = False
 
     def update_config(self, cfg: RateConfig):
         self.cfg = cfg
@@ -61,16 +64,27 @@ class RateLimiter:
         return cx + dx, cy + dy
 
     def sleep_until_ready(self, kind: str):
+        """Sleep until the next input event can be sent, with collision detection.
+
+        Prevents mouse and keyboard events from interfering with each other
+        by tracking active input types.
+        """
         if kind == 'click':
+            self._mouse_active = True
             t = self.time_until_click();
             if t > 0: sleep(t)
             self.mark_click()
+            self._mouse_active = False
         elif kind == 'key':
+            self._keyboard_active = True
             t = self.time_until_key();
             if t > 0: sleep(t)
             self.mark_key()
+            self._keyboard_active = False
         elif kind == 'move':
+            self._mouse_active = True
             t = self.time_until_move();
             if t > 0: sleep(t)
             self.mark_move()
+            self._mouse_active = False
 

@@ -1,4 +1,4 @@
-# Windows Driver Input MCP
+# Windows Driver Input MCP (Standalone)
 
 Standalone MCP server exposing driver-level keyboard/mouse tools via IbInputSimulator.
 
@@ -7,7 +7,6 @@ Standalone MCP server exposing driver-level keyboard/mouse tools via IbInputSimu
 - Supports Unicode text, WASD, combos, holds, and scroll
 
 Repository: https://github.com/win10ogod/windows-driver-input-mcp
-
 License: MIT
 
 ## Run
@@ -35,6 +34,13 @@ Configure via env (defaults shown):
 - `Shortcut-Tool`
 - `Key-Tool(mode=tap|down|up|hold, key, times, interval_ms, hold_ms)`
 - `Combo-Tool(keys=[...], hold_ms=...)`
+- `Desktop-Info` (virtual screen origin/size, monitor count)
+- `Window-Info` (active window title/class and rect)
+- `Windows-List` (enumerate windows; top-level or children via parent_hwnd; filters: query, only_visible, include_minimized, include_cloaked, limit)
+- `Windows-Select` (select by `index` or first match by `query`; supports parent_hwnd and visibility flags; returns hwnd and details)
+- `Windows-Activate` (bring to front; optional `show=restore|minimize|maximize|show`, `topmost=true|false`)
+- `Windows-SetPos` (move/resize; `loc=[x,y]`, `size=[w,h]`, `z=topmost|notopmost|top|bottom`)
+- `Windows-Close` (send WM_CLOSE)
 - `Input-RateLimiter-Config`
 
 ## IbInputSimulator

@@ -44,7 +44,56 @@
     { "name": "Scroll-Tool", "description": "Scroll vertically or horizontally at optional [x,y] using driver/OS-level events" },
     { "name": "Key-Tool", "description": "Press/hold/release a single key (supports WASD)" },
     { "name": "Combo-Tool", "description": "Hold multiple keys together for duration (e.g., ['shift','w'])" },
+    { "name": "Desktop-Info", "description": "Return virtual screen origin/size and monitor count" },
+    { "name": "Window-Info", "description": "Return active window title/class and rect [l,t,r,b]" },
+    { "name": "Windows-List", "description": "Enumerate windows; top-level or children via parent_hwnd. Filters: query, only_visible, include_minimized, include_cloaked, limit" },
+    { "name": "Windows-Select", "description": "Select a window and return hwnd (index or first match by query; supports parent_hwnd and visibility flags)" },
+    { "name": "Windows-Activate", "description": "Bring a window to front and optionally toggle topmost or show/restore/minimize/maximize" },
+    { "name": "Windows-SetPos", "description": "Move/resize window via SetWindowPos; supports z-order changes (topmost/notopmost/top/bottom)" },
+    { "name": "Windows-Close", "description": "Send WM_CLOSE to a window" },
     { "name": "Input-RateLimiter-Config", "description": "Update move_hz/max_delta/smooth/cps/kps at runtime" }
+  ],
+  "prompts": [
+    {
+      "name": "Click-At",
+      "description": "Click at coordinates using Click-Tool.",
+      "arguments": [
+        { "name": "loc", "type": "string", "required": true, "description": "Target 'x,y' or [x,y]" },
+        { "name": "button", "type": "string", "required": false, "description": "left|right|middle" },
+        { "name": "clicks", "type": "number", "required": false, "description": "Repeat count" }
+      ]
+    },
+    {
+      "name": "Type-Text",
+      "description": "Type text via driver-level injection.",
+      "arguments": [
+        { "name": "text", "type": "string", "required": true, "description": "Text to type" },
+        { "name": "method", "type": "string", "required": false, "description": "unicode|clipboard|vk" }
+      ]
+    },
+    {
+      "name": "Send-Shortcut",
+      "description": "Send a keyboard shortcut like 'ctrl+c' or 'win+r'.",
+      "arguments": [
+        { "name": "shortcut", "type": "string", "required": true, "description": "e.g., ctrl+c" }
+      ]
+    },
+    {
+      "name": "Activate-Window",
+      "description": "List/select a window and activate it.",
+      "arguments": [
+        { "name": "query", "type": "string", "required": false, "description": "Title/class/PID substring" },
+        { "name": "index", "type": "number", "required": false, "description": "Index from Windows-List" }
+      ]
+    },
+    {
+      "name": "Drag-From-To",
+      "description": "Drag from one point to another.",
+      "arguments": [
+        { "name": "from_loc", "type": "string", "required": true, "description": "'x,y' or [x,y]" },
+        { "name": "to_loc", "type": "string", "required": true, "description": "'x,y' or [x,y]" }
+      ]
+    }
   ],
   "tools_generated": true,
   "compatibility": { "platforms": ["win32"] },
