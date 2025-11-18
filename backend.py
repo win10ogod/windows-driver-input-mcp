@@ -13,6 +13,25 @@ from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
 
+# Mouse button constants for IBSimulator DLL
+MOUSE_LEFT_DOWN = 0x02
+MOUSE_LEFT_UP = 0x04
+MOUSE_LEFT_CLICK = 0x06
+MOUSE_RIGHT_DOWN = 0x08
+MOUSE_RIGHT_UP = 0x10
+MOUSE_RIGHT_CLICK = 0x18
+MOUSE_MIDDLE_DOWN = 0x20
+MOUSE_MIDDLE_UP = 0x40
+MOUSE_MIDDLE_CLICK = 0x60
+
+# Virtual key codes for common keys
+VK_SHIFT = 0x10
+VK_CTRL = 0x11
+VK_ALT = 0x12
+
+# Wheel delta constant
+WHEEL_DELTA = 120
+
 
 @dataclass
 class BackendInfo:
@@ -341,6 +360,9 @@ class IBSimulatorDLLBackend(InputBackend):
     def __init__(self, driver: str = "AnyDriver"):
         self._driver = driver
         self._debug = str(os.getenv('WINDOWS_MCP_INPUT_DEBUG', '0')).lower() in ('1','true','yes','on')
+        # Configurable text input delays (in seconds)
+        self._char_delay = float(os.getenv('WINDOWS_MCP_CHAR_DELAY', '0.010'))  # 10ms default (was 20ms)
+        self._key_delay = float(os.getenv('WINDOWS_MCP_KEY_DELAY', '0.003'))    # 3ms default
         dll_path = _ib_dll_path()
         self._dll_path = str(dll_path) if dll_path else ""
         self._ready = False
@@ -389,6 +411,15 @@ class IBSimulatorDLLBackend(InputBackend):
             self._err = str(e)
             self._ready = False
 
+    def __del__(self):
+        """Cleanup DLL resources on destruction."""
+        if self._ready and hasattr(self, '_dll'):
+            try:
+                self._dll.IbSendDestroy()
+                logger.debug("IBSimulator DLL resources cleaned up")
+            except Exception as e:
+                logger.debug(f"Error during DLL cleanup: {e}")
+
     def info(self) -> BackendInfo:
         return BackendInfo("IBSimulatorDLL", self._ready, f"dll={self._dll_path}, driver={self._driver}, err={self._err}")
 
@@ -413,8 +444,12 @@ class IBSimulatorDLLBackend(InputBackend):
         if not self._ready:
             return
         self.move(x, y)
-        btn_map = { 'left': 0x06, 'right': 0x18, 'middle': 0x60 }
-        code = btn_map.get(button.lower(), 0x06)
+        btn_map = {
+            'left': MOUSE_LEFT_CLICK,
+            'right': MOUSE_RIGHT_CLICK,
+            'middle': MOUSE_MIDDLE_CLICK
+        }
+        code = btn_map.get(button.lower(), MOUSE_LEFT_CLICK)
         for _ in range(max(1, int(clicks))):
             self._dll.IbSendMouseClick(code)
 
@@ -422,9 +457,9 @@ class IBSimulatorDLLBackend(InputBackend):
         if not self._ready:
             return
         self.move(x1, y1)
-        self._dll.IbSendMouseClick(0x02)  # LeftDown
+        self._dll.IbSendMouseClick(MOUSE_LEFT_DOWN)
         self.move(x2, y2)
-        self._dll.IbSendMouseClick(0x04)  # LeftUp
+        self._dll.IbSendMouseClick(MOUSE_LEFT_UP)
 
     def _vk_for_key(self, key: str) -> int | None:
         if not isinstance(key, str) or not key:
@@ -497,20 +532,16 @@ class IBSimulatorDLLBackend(InputBackend):
             return
         import time
 
-        # Increased delay to ensure proper character ordering
-        # 20ms is more reliable for preventing race conditions
-        char_delay = 0.020  # 20ms delay between characters
-        key_delay = 0.003   # 3ms between key down and up
+        # Use configurable delays for better performance
+        # Defaults: 10ms between chars, 3ms between key down/up
+        char_delay = self._char_delay
+        key_delay = self._key_delay
 
         if self._debug:
-            logger.info(f"[send_text] Starting to send {len(text)} characters: {repr(text)}")
+            logger.info(f"[send_text] Starting to send {len(text)} characters: {repr(text)} (char_delay={char_delay}s, key_delay={key_delay}s)")
 
         # Use VK mode exclusively for reliability
         # Unicode batch mode is disabled due to race condition issues
-        SHIFT = 0x10
-        CTRL = 0x11
-        ALT = 0x12
-
         for idx, ch in enumerate(text):
             if self._debug:
                 logger.info(f"[send_text] Character {idx}: {repr(ch)}")
@@ -527,13 +558,13 @@ class IBSimulatorDLLBackend(InputBackend):
             try:
                 # Press modifiers
                 if mods & 0x01:
-                    self._dll.IbSendKeybdDown(SHIFT)
+                    self._dll.IbSendKeybdDown(VK_SHIFT)
                     time.sleep(0.001)
                 if mods & 0x02:
-                    self._dll.IbSendKeybdDown(CTRL)
+                    self._dll.IbSendKeybdDown(VK_CTRL)
                     time.sleep(0.001)
                 if mods & 0x04:
-                    self._dll.IbSendKeybdDown(ALT)
+                    self._dll.IbSendKeybdDown(VK_ALT)
                     time.sleep(0.001)
 
                 # Press and release the key
@@ -544,13 +575,13 @@ class IBSimulatorDLLBackend(InputBackend):
                 # Release modifiers in reverse order
                 if mods & 0x04:
                     time.sleep(0.001)
-                    self._dll.IbSendKeybdUp(ALT)
+                    self._dll.IbSendKeybdUp(VK_ALT)
                 if mods & 0x02:
                     time.sleep(0.001)
-                    self._dll.IbSendKeybdUp(CTRL)
+                    self._dll.IbSendKeybdUp(VK_CTRL)
                 if mods & 0x01:
                     time.sleep(0.001)
-                    self._dll.IbSendKeybdUp(SHIFT)
+                    self._dll.IbSendKeybdUp(VK_SHIFT)
 
                 # Wait before next character
                 time.sleep(char_delay)
@@ -620,7 +651,6 @@ class IBSimulatorDLLBackend(InputBackend):
         if not self._ready:
             return
         t = (type or "vertical").lower(); d = (direction or "down").lower()
-        WHEEL_DELTA = 120
         n = max(1, int(wheel_times))
         if t == "vertical":
             delta = WHEEL_DELTA * n

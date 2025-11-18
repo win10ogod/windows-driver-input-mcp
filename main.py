@@ -331,6 +331,113 @@ def _coerce_wh(value) -> tuple[int, int]:
     raise ValueError("size must be [w,h] or {w,h}")
 
 
+# Common RECT structure to avoid duplication
+class RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+def _enumerate_windows(
+    query: str | None = None,
+    only_visible: bool = True,
+    include_minimized: bool = True,
+    include_cloaked: bool = True,
+    limit: int | None = None,
+    parent_hwnd: int | None = None,
+) -> list[dict]:
+    """Common window enumeration logic shared by Windows-List and Windows-Select.
+
+    Returns a list of window info dictionaries with keys:
+    hwnd, pid, class, title, left, top, right, bottom, visible, minimized, cloaked
+    """
+    user32 = ctypes.windll.user32
+
+    EnumWindows = user32.EnumWindows
+    IsWindowVisible = user32.IsWindowVisible
+    IsIconic = user32.IsIconic
+    GetWindowTextLengthW = user32.GetWindowTextLengthW
+    GetWindowTextW = user32.GetWindowTextW
+    GetClassNameW = user32.GetClassNameW
+    GetWindowRect = user32.GetWindowRect
+    GetWindowThreadProcessId = user32.GetWindowThreadProcessId
+    EnumChildWindows = user32.EnumChildWindows
+
+    # DWM cloaking (occluded/hidden by OS)
+    cloaked_attr = 14  # DWMWA_CLOAKED
+    try:
+        dwmapi = ctypes.windll.dwmapi
+        DwmGetWindowAttribute = dwmapi.DwmGetWindowAttribute
+        def _is_cloaked(hwnd):
+            val = ctypes.c_int(0)
+            try:
+                DwmGetWindowAttribute(hwnd, cloaked_attr, ctypes.byref(val), ctypes.sizeof(val))
+                return bool(val.value)
+            except Exception:
+                return False
+    except Exception:
+        def _is_cloaked(hwnd):
+            return False
+
+    results: list[dict] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_void_p)
+    def _enum_proc(hwnd, lparam):
+        try:
+            visible = bool(IsWindowVisible(hwnd))
+            minimized = bool(IsIconic(hwnd))
+            cloaked = _is_cloaked(hwnd)
+            if only_visible and not visible:
+                return True
+            if minimized and not include_minimized:
+                return True
+            if cloaked and not include_cloaked:
+                return True
+            # Title
+            length = int(GetWindowTextLengthW(hwnd))
+            tbuf = ctypes.create_unicode_buffer(length + 1) if length > 0 else ctypes.create_unicode_buffer(1)
+            GetWindowTextW(hwnd, tbuf, len(tbuf))
+            title = tbuf.value
+            # Class
+            cbuf = ctypes.create_unicode_buffer(256)
+            GetClassNameW(hwnd, cbuf, 256)
+            cls = cbuf.value
+            # Rect
+            rc = RECT()
+            GetWindowRect(hwnd, ctypes.byref(rc))
+            # PID
+            pid = ctypes.c_ulong()
+            GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+            item = {
+                'hwnd': int(hwnd),
+                'pid': int(pid.value),
+                'class': cls,
+                'title': title,
+                'left': int(rc.left), 'top': int(rc.top), 'right': int(rc.right), 'bottom': int(rc.bottom),
+                'visible': visible,
+                'minimized': minimized,
+                'cloaked': cloaked,
+            }
+
+            q = (query or '').strip().lower()
+            if q:
+                if q not in (title or '').lower() and q not in (cls or '').lower() and q not in str(item['pid']):
+                    return True
+
+            results.append(item)
+            if limit is not None and len(results) >= int(limit):
+                return False  # stop enumeration
+        except Exception:
+            pass
+        return True
+
+    if parent_hwnd is not None and int(parent_hwnd) != 0:
+        EnumChildWindows(wintypes.HWND(int(parent_hwnd)), _enum_proc, 0)
+    else:
+        EnumWindows(_enum_proc, 0)
+
+    return results
+
+
 @mcp.tool(
     name="Input-Info",
     description="Return current backend info and rate limiter config."
@@ -387,8 +494,6 @@ def window_info() -> str:
     user32.GetClassNameW(hwnd, bufc, 256)
     cls = bufc.value
     # Rect
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
     rc = RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(rc))
     l, t, r, b = int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
@@ -452,9 +557,8 @@ def windows_activate(hwnd: int | str, show: str | None = None, topmost: bool | N
         )
 
     # Return final rect
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-    rc = RECT(); user32.GetWindowRect(wintypes.HWND(target), ctypes.byref(rc))
+    rc = RECT()
+    user32.GetWindowRect(wintypes.HWND(target), ctypes.byref(rc))
     l, t, r, b = int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
     w, h = r - l, b - t
     return f"Activate {'OK' if ok else 'TRY'} hwnd=0x{target:08X} rect=[{l},{t},{r},{b}] size=[{w},{h}] topmost={'on' if topmost else 'unchanged' if topmost is None else 'off'}"
@@ -504,9 +608,8 @@ def windows_setpos(
     flags |= SWP_SHOWWINDOW
     ok = bool(user32.SetWindowPos(wintypes.HWND(target), insert_after, int(x), int(y), int(w), int(h), int(flags)))
 
-    class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-    rc = RECT(); user32.GetWindowRect(wintypes.HWND(target), ctypes.byref(rc))
+    rc = RECT()
+    user32.GetWindowRect(wintypes.HWND(target), ctypes.byref(rc))
     l, t, r, b = int(rc.left), int(rc.top), int(rc.right), int(rc.bottom)
     return f"SetPos {'OK' if ok else 'FAIL'} hwnd=0x{target:08X} rect=[{l},{t},{r},{b}]"
 
@@ -535,93 +638,7 @@ def windows_list(
     limit: int | None = None,
     parent_hwnd: int | None = None,
 ) -> str:
-    user32 = ctypes.windll.user32
-
-    EnumWindows = user32.EnumWindows
-    IsWindowVisible = user32.IsWindowVisible
-    IsIconic = user32.IsIconic
-    GetWindowTextLengthW = user32.GetWindowTextLengthW
-    GetWindowTextW = user32.GetWindowTextW
-    GetClassNameW = user32.GetClassNameW
-    GetWindowRect = user32.GetWindowRect
-    GetWindowThreadProcessId = user32.GetWindowThreadProcessId
-    EnumChildWindows = user32.EnumChildWindows
-
-    # DWM cloaking (occluded/hidden by OS)
-    cloaked_attr = 14  # DWMWA_CLOAKED
-    try:
-        dwmapi = ctypes.windll.dwmapi
-        DwmGetWindowAttribute = dwmapi.DwmGetWindowAttribute
-        def _is_cloaked(hwnd):
-            val = ctypes.c_int(0)
-            try:
-                DwmGetWindowAttribute(hwnd, cloaked_attr, ctypes.byref(val), ctypes.sizeof(val))
-                return bool(val.value)
-            except Exception:
-                return False
-    except Exception:
-        def _is_cloaked(hwnd):
-            return False
-
-    results: list[dict] = []
-
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_void_p)
-    def _enum_proc(hwnd, lparam):
-        try:
-            visible = bool(IsWindowVisible(hwnd))
-            minimized = bool(IsIconic(hwnd))
-            cloaked = _is_cloaked(hwnd)
-            if only_visible and not visible:
-                return True
-            if minimized and not include_minimized:
-                return True
-            if cloaked and not include_cloaked:
-                return True
-            # Title
-            length = int(GetWindowTextLengthW(hwnd))
-            tbuf = ctypes.create_unicode_buffer(length + 1) if length > 0 else ctypes.create_unicode_buffer(1)
-            GetWindowTextW(hwnd, tbuf, len(tbuf))
-            title = tbuf.value
-            # Class
-            cbuf = ctypes.create_unicode_buffer(256)
-            GetClassNameW(hwnd, cbuf, 256)
-            cls = cbuf.value
-            # Rect
-            class RECT(ctypes.Structure):
-                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-            rc = RECT()
-            GetWindowRect(hwnd, ctypes.byref(rc))
-            # PID
-            pid = ctypes.c_ulong()
-            GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-
-            item = {
-                'hwnd': int(hwnd),
-                'pid': int(pid.value),
-                'class': cls,
-                'title': title,
-                'left': int(rc.left), 'top': int(rc.top), 'right': int(rc.right), 'bottom': int(rc.bottom),
-                'visible': visible,
-                'minimized': minimized,
-                'cloaked': cloaked,
-            }
-
-            q = (query or '').strip().lower()
-            if q:
-                if q not in (title or '').lower() and q not in (cls or '').lower() and q not in str(item['pid']):
-                    return True
-
-            results.append(item)
-            if limit is not None and len(results) >= int(limit):
-                return False  # stop enumeration
-        except Exception:
-            pass
-        return True
-
-    if parent_hwnd is not None and int(parent_hwnd) != 0:
-        EnumChildWindows(wintypes.HWND(int(parent_hwnd)), _enum_proc, 0)
-    else:
-        EnumWindows(_enum_proc, 0)
+    results = _enumerate_windows(query, only_visible, include_minimized, include_cloaked, limit, parent_hwnd)
 
     lines = [
         "idx  hwnd        pid   V M C  class                title                          rect[l,t,r,b]  size[w,h]",
@@ -652,77 +669,7 @@ def windows_select(
     index: int | None = None,
     parent_hwnd: int | None = None,
 ) -> str:
-    user32 = ctypes.windll.user32
-
-    EnumWindows = user32.EnumWindows
-    IsWindowVisible = user32.IsWindowVisible
-    IsIconic = user32.IsIconic
-    GetWindowTextLengthW = user32.GetWindowTextLengthW
-    GetWindowTextW = user32.GetWindowTextW
-    GetClassNameW = user32.GetClassNameW
-    GetWindowRect = user32.GetWindowRect
-    GetWindowThreadProcessId = user32.GetWindowThreadProcessId
-    EnumChildWindows = user32.EnumChildWindows
-
-    # DWM cloaking
-    cloaked_attr = 14  # DWMWA_CLOAKED
-    try:
-        dwmapi = ctypes.windll.dwmapi
-        DwmGetWindowAttribute = dwmapi.DwmGetWindowAttribute
-        def _is_cloaked(hwnd):
-            val = ctypes.c_int(0)
-            try:
-                DwmGetWindowAttribute(hwnd, cloaked_attr, ctypes.byref(val), ctypes.sizeof(val))
-                return bool(val.value)
-            except Exception:
-                return False
-    except Exception:
-        def _is_cloaked(hwnd):
-            return False
-
-    results: list[dict] = []
-
-    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_void_p)
-    def _enum_proc(hwnd, lparam):
-        try:
-            visible = bool(IsWindowVisible(hwnd))
-            minimized = bool(IsIconic(hwnd))
-            cloaked = _is_cloaked(hwnd)
-            if only_visible and not visible:
-                return True
-            if minimized and not include_minimized:
-                return True
-            if cloaked and not include_cloaked:
-                return True
-            length = int(GetWindowTextLengthW(hwnd))
-            tbuf = ctypes.create_unicode_buffer(length + 1) if length > 0 else ctypes.create_unicode_buffer(1)
-            GetWindowTextW(hwnd, tbuf, len(tbuf))
-            title = tbuf.value
-            cbuf = ctypes.create_unicode_buffer(256)
-            GetClassNameW(hwnd, cbuf, 256)
-            cls = cbuf.value
-            class RECT(ctypes.Structure):
-                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
-            rc = RECT(); GetWindowRect(hwnd, ctypes.byref(rc))
-            pid = ctypes.c_ulong(); GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            item = {
-                'hwnd': int(hwnd), 'pid': int(pid.value), 'class': cls, 'title': title,
-                'left': int(rc.left), 'top': int(rc.top), 'right': int(rc.right), 'bottom': int(rc.bottom),
-                'visible': visible, 'minimized': minimized, 'cloaked': cloaked,
-            }
-            q = (query or '').strip().lower()
-            if q:
-                if q not in (title or '').lower() and q not in (cls or '').lower() and q not in str(item['pid']):
-                    return True
-            results.append(item)
-        except Exception:
-            pass
-        return True
-
-    if parent_hwnd is not None and int(parent_hwnd) != 0:
-        EnumChildWindows(wintypes.HWND(int(parent_hwnd)), _enum_proc, 0)
-    else:
-        EnumWindows(_enum_proc, 0)
+    results = _enumerate_windows(query, only_visible, include_minimized, include_cloaked, limit=None, parent_hwnd=parent_hwnd)
 
     if not results:
         return "No windows matched."
