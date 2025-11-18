@@ -62,25 +62,35 @@ def _backend_from_env() -> InputBackend:
     preferred = (os.getenv("WINDOWS_MCP_INPUT_BACKEND", "ibsim-dll") or "").lower()
     driver = os.getenv("WINDOWS_MCP_INPUT_DRIVER", "AnyDriver")
 
+    logger.info(f"Initializing input backend: {preferred}, driver: {driver}")
+
     if preferred in ("ibsim-dll", "ibsim"):
         be = IBSimulatorDLLBackend(driver=driver)
         if be.info().ready:
+            logger.info("DLL backend initialized successfully")
             return be
         # If DLL path is not ready and user explicitly set ibsim-dll, keep it strict
         if preferred == "ibsim-dll":
+            logger.error("IBSimulator DLL backend initialization failed")
             raise RuntimeError("IBSimulator DLL backend not ready. Check IbInputSimulator DLL files.")
         # Otherwise try AHK as a best-effort driver-level path
+        logger.info("DLL backend not ready, trying AHK backend...")
         ahk = IBSimulatorAHKBackend(driver=driver)
         if ahk.info().ready:
+            logger.info("AHK backend initialized successfully")
             return ahk
+        logger.error("No driver-level backend is ready")
         raise RuntimeError("No driver-level backend is ready (DLL/AHK).")
 
     if preferred == "ibsim-ahk":
         ahk = IBSimulatorAHKBackend(driver=driver)
         if ahk.info().ready:
+            logger.info("AHK backend initialized successfully")
             return ahk
+        logger.error("IBSimulator AHK backend initialization failed")
         raise RuntimeError("IBSimulator AHK backend not ready. Install AutoHotkey v2 and include files.")
 
+    logger.error(f"Unsupported backend type: {preferred}")
     raise RuntimeError(f"Unsupported WINDOWS_MCP_INPUT_BACKEND={preferred}. Use 'ibsim-dll' or 'ibsim-ahk'.")
 
 
@@ -695,20 +705,28 @@ def windows_select(
     description="Move cursor to coordinates. Format: to_loc=[x,y] or 'x,y'. Uses stepwise movement under rate limits."
 )
 def move_tool(to_loc: list[int] | dict | str) -> str:
-    tx, ty = _coerce_xy(to_loc)
-    # Step toward target using RateLimiter
-    for _ in range(3000):  # hard cap
-        cx, cy = _get_cursor_pos()
-        if (cx, cy) == (tx, ty):
-            break
-        nx, ny = rate.filter_target((cx, cy), (tx, ty))
-        rate.sleep_until_ready("move")
-        backend.move(nx, ny)
-        if (nx, ny) == (tx, ty):
-            # final snap if needed
-            backend.move(tx, ty)
-            break
-    return f"Moved to ({tx},{ty})."
+    try:
+        tx, ty = _coerce_xy(to_loc)
+        logger.debug(f"Moving cursor to ({tx},{ty})")
+        # Step toward target using RateLimiter
+        for _ in range(3000):  # hard cap
+            cx, cy = _get_cursor_pos()
+            if (cx, cy) == (tx, ty):
+                break
+            nx, ny = rate.filter_target((cx, cy), (tx, ty))
+            rate.sleep_until_ready("move")
+            backend.move(nx, ny)
+            if (nx, ny) == (tx, ty):
+                # final snap if needed
+                backend.move(tx, ty)
+                break
+        return f"Moved to ({tx},{ty})."
+    except ValueError as e:
+        logger.error(f"Invalid move location format: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Move operation failed: {e}")
+        raise
 
 
 @mcp.tool(
@@ -716,10 +734,19 @@ def move_tool(to_loc: list[int] | dict | str) -> str:
     description="Click at coordinates. Format: loc=[x,y], button='left|right|middle', clicks=int."
 )
 def click_tool(loc: list[int] | dict | str, button: Literal['left', 'right', 'middle'] = 'left', clicks: int = 1) -> str:
-    x, y = _coerce_xy(loc)
-    rate.sleep_until_ready("click")
-    backend.click(x, y, button=button, clicks=int(max(1, clicks)))
-    return f"{button} click x{int(max(1, clicks))} at ({x},{y})."
+    try:
+        x, y = _coerce_xy(loc)
+        num_clicks = int(max(1, clicks))
+        logger.debug(f"Clicking {button} button x{num_clicks} at ({x},{y})")
+        rate.sleep_until_ready("click")
+        backend.click(x, y, button=button, clicks=num_clicks)
+        return f"{button} click x{num_clicks} at ({x},{y})."
+    except ValueError as e:
+        logger.error(f"Invalid click location format: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Click operation failed: {e}")
+        raise
 
 
 @mcp.tool(
@@ -739,30 +766,37 @@ def drag_tool(from_loc: list[int] | dict | str, to_loc: list[int] | dict | str) 
 )
 def type_tool(text: str, method: Literal['unicode', 'clipboard', 'vk'] = 'unicode', press_enter: bool = False) -> str:
     if not isinstance(text, str):
+        logger.error("Type-Tool received non-string text")
         raise ValueError("text must be a string")
-    m = (method or 'unicode').lower()
-    if m == 'clipboard':
-        ok = _set_clipboard_text(text)
-        if not ok:
-            raise RuntimeError('Failed to set clipboard text')
-        rate.sleep_until_ready('key')
-        backend.hotkey('ctrl+v')
-    elif m == 'vk':
-        # Emit via key_down/up using keyboard mapping; safer for some games
-        for ch in text:
+    try:
+        m = (method or 'unicode').lower()
+        logger.debug(f"Typing {len(text)} characters via {m} method")
+        if m == 'clipboard':
+            ok = _set_clipboard_text(text)
+            if not ok:
+                logger.error("Failed to set clipboard text")
+                raise RuntimeError('Failed to set clipboard text')
             rate.sleep_until_ready('key')
-            backend.key_down(ch)
-            backend.key_up(ch)
-    else:
-        # Default unicode path - send entire text to backend
-        # Backend now handles character-by-character sending with proper delays
-        # No need to chunk here, backend.send_text has built-in delays
-        rate.sleep_until_ready('key')
-        backend.send_text(text)
-    if press_enter:
-        rate.sleep_until_ready('key')
-        backend.hotkey('enter')
-    return f"Typed {len(text)} chars via {m}."
+            backend.hotkey('ctrl+v')
+        elif m == 'vk':
+            # Emit via key_down/up using keyboard mapping; safer for some games
+            for ch in text:
+                rate.sleep_until_ready('key')
+                backend.key_down(ch)
+                backend.key_up(ch)
+        else:
+            # Default unicode path - send entire text to backend
+            # Backend now handles character-by-character sending with proper delays
+            # No need to chunk here, backend.send_text has built-in delays
+            rate.sleep_until_ready('key')
+            backend.send_text(text)
+        if press_enter:
+            rate.sleep_until_ready('key')
+            backend.hotkey('enter')
+        return f"Typed {len(text)} chars via {m}."
+    except Exception as e:
+        logger.error(f"Type operation failed: {e}")
+        raise
 
 
 @mcp.tool(
@@ -771,10 +805,16 @@ def type_tool(text: str, method: Literal['unicode', 'clipboard', 'vk'] = 'unicod
 )
 def shortcut_tool(shortcut: str) -> str:
     if not isinstance(shortcut, str) or not shortcut:
+        logger.error("Shortcut-Tool received invalid shortcut")
         raise ValueError("shortcut must be a non-empty string, e.g., 'ctrl+c'")
-    rate.sleep_until_ready("key")
-    backend.hotkey(shortcut)
-    return f"Shortcut sent: {shortcut}"
+    try:
+        logger.debug(f"Sending keyboard shortcut: {shortcut}")
+        rate.sleep_until_ready("key")
+        backend.hotkey(shortcut)
+        return f"Shortcut sent: {shortcut}"
+    except Exception as e:
+        logger.error(f"Shortcut operation failed: {e}")
+        raise
 
 
 @mcp.tool(

@@ -156,6 +156,7 @@ class IBSimulatorAHKBackend(InputBackend):
 
     def _run(self, body: str) -> int:
         if not self._ready:
+            logger.warning("AHK backend not ready, skipping command")
             return 1
         inc_path = str(self._inc)
         dll_path = str(self._dll)
@@ -178,13 +179,26 @@ class IBSimulatorAHKBackend(InputBackend):
             tf.write(script.encode("utf-8"))
             tf_path = tf.name
         try:
-            proc = subprocess.run([self._ahk, "/ErrorStdOut", tf_path], timeout=6)
+            proc = subprocess.run(
+                [self._ahk, "/ErrorStdOut", tf_path],
+                timeout=6,
+                capture_output=True,
+                text=True
+            )
+            if proc.returncode != 0:
+                logger.warning(f"AHK script failed with code {proc.returncode}: {proc.stderr}")
             return proc.returncode
+        except subprocess.TimeoutExpired:
+            logger.error("AHK script execution timeout (6s)")
+            return 1
+        except Exception as e:
+            logger.error(f"Failed to execute AHK script: {e}")
+            return 1
         finally:
             try:
                 os.remove(tf_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to cleanup temp AHK file {tf_path}: {e}")
 
     def move(self, x: int, y: int):
         body = (
@@ -370,7 +384,9 @@ class IBSimulatorDLLBackend(InputBackend):
         try:
             if not self._dll_path or not Path(self._dll_path).exists():
                 self._err = f"dll not found at {self._dll_path}"
+                logger.error(f"IBSimulator DLL not found: {self._dll_path}")
                 return
+            logger.info(f"Loading IBSimulator DLL from: {self._dll_path}")
             self._dll = ctypes.WinDLL(self._dll_path)
             self._dll.IbSendInit.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
             self._dll.IbSendInit.restype = ctypes.c_uint32
@@ -400,6 +416,7 @@ class IBSimulatorDLLBackend(InputBackend):
             rc = self._dll.IbSendInit(send_type, 0, None)
             if rc != 0:
                 self._err = f"IbSendInit error={rc} (driver={self._driver})"
+                logger.error(f"Failed to initialize IBSimulator: error code {rc}, driver={self._driver}")
                 return
             self._user32 = ctypes.WinDLL('user32', use_last_error=True)
             self._user32.VkKeyScanW.argtypes = [wintypes.WCHAR]
@@ -407,9 +424,11 @@ class IBSimulatorDLLBackend(InputBackend):
             self._user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
             self._user32.SetCursorPos.restype = ctypes.c_bool
             self._ready = True
+            logger.info(f"IBSimulator DLL backend initialized successfully with driver: {self._driver}")
         except Exception as e:
             self._err = str(e)
             self._ready = False
+            logger.error(f"Failed to initialize IBSimulator DLL backend: {e}")
 
     def __del__(self):
         """Cleanup DLL resources on destruction."""
@@ -426,40 +445,52 @@ class IBSimulatorDLLBackend(InputBackend):
     # Mouse
     def move(self, x: int, y: int):
         if not self._ready:
+            logger.warning("DLL backend not ready, skipping mouse move")
             return
-        xi, yi = int(x), int(y)
-        self._user32.SetCursorPos(xi, yi)
-        class POINT(ctypes.Structure):
-            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-        pt = POINT()
-        self._user32.GetCursorPos(ctypes.byref(pt))
-        dx = xi - int(pt.x)
-        dy = yi - int(pt.y)
-        if dx or dy:
-            self._dll.IbSendMouseMove(ctypes.c_uint32(dx & 0xFFFFFFFF).value,
-                                      ctypes.c_uint32(dy & 0xFFFFFFFF).value,
-                                      1)
+        try:
+            xi, yi = int(x), int(y)
+            self._user32.SetCursorPos(xi, yi)
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            pt = POINT()
+            self._user32.GetCursorPos(ctypes.byref(pt))
+            dx = xi - int(pt.x)
+            dy = yi - int(pt.y)
+            if dx or dy:
+                self._dll.IbSendMouseMove(ctypes.c_uint32(dx & 0xFFFFFFFF).value,
+                                          ctypes.c_uint32(dy & 0xFFFFFFFF).value,
+                                          1)
+        except Exception as e:
+            logger.error(f"Mouse move failed: {e}")
 
     def click(self, x: int, y: int, button: str = "left", clicks: int = 1):
         if not self._ready:
+            logger.warning("DLL backend not ready, skipping mouse click")
             return
-        self.move(x, y)
-        btn_map = {
-            'left': MOUSE_LEFT_CLICK,
-            'right': MOUSE_RIGHT_CLICK,
-            'middle': MOUSE_MIDDLE_CLICK
-        }
-        code = btn_map.get(button.lower(), MOUSE_LEFT_CLICK)
-        for _ in range(max(1, int(clicks))):
-            self._dll.IbSendMouseClick(code)
+        try:
+            self.move(x, y)
+            btn_map = {
+                'left': MOUSE_LEFT_CLICK,
+                'right': MOUSE_RIGHT_CLICK,
+                'middle': MOUSE_MIDDLE_CLICK
+            }
+            code = btn_map.get(button.lower(), MOUSE_LEFT_CLICK)
+            for _ in range(max(1, int(clicks))):
+                self._dll.IbSendMouseClick(code)
+        except Exception as e:
+            logger.error(f"Mouse click failed: {e}")
 
     def drag(self, x1: int, y1: int, x2: int, y2: int):
         if not self._ready:
+            logger.warning("DLL backend not ready, skipping mouse drag")
             return
-        self.move(x1, y1)
-        self._dll.IbSendMouseClick(MOUSE_LEFT_DOWN)
-        self.move(x2, y2)
-        self._dll.IbSendMouseClick(MOUSE_LEFT_UP)
+        try:
+            self.move(x1, y1)
+            self._dll.IbSendMouseClick(MOUSE_LEFT_DOWN)
+            self.move(x2, y2)
+            self._dll.IbSendMouseClick(MOUSE_LEFT_UP)
+        except Exception as e:
+            logger.error(f"Mouse drag failed: {e}")
 
     def _vk_for_key(self, key: str) -> int | None:
         if not isinstance(key, str) or not key:
@@ -599,53 +630,69 @@ class IBSimulatorDLLBackend(InputBackend):
 
     def hotkey(self, combo: str):
         if not self._ready:
+            logger.warning("DLL backend not ready, skipping hotkey")
             return
-        parts = [p.strip().lower() for p in combo.split('+') if p.strip()]
-        mods = set(); key = None
-        for p in parts:
-            if p in ("ctrl", "control"): mods.add("ctrl"); continue
-            if p in ("alt",): mods.add("alt"); continue
-            if p in ("shift",): mods.add("shift"); continue
-            if p in ("win", "lwin", "rwin"): mods.add("win"); continue
-            key = p
-        if "win" in mods: self._dll.IbSendKeybdDown(0x5B)
-        if "ctrl" in mods: self._dll.IbSendKeybdDown(0x11)
-        if "alt" in mods: self._dll.IbSendKeybdDown(0x12)
-        if "shift" in mods: self._dll.IbSendKeybdDown(0x10)
-        if key:
+        try:
+            parts = [p.strip().lower() for p in combo.split('+') if p.strip()]
+            mods = set(); key = None
+            for p in parts:
+                if p in ("ctrl", "control"): mods.add("ctrl"); continue
+                if p in ("alt",): mods.add("alt"); continue
+                if p in ("shift",): mods.add("shift"); continue
+                if p in ("win", "lwin", "rwin"): mods.add("win"); continue
+                key = p
+            if "win" in mods: self._dll.IbSendKeybdDown(0x5B)
+            if "ctrl" in mods: self._dll.IbSendKeybdDown(0x11)
+            if "alt" in mods: self._dll.IbSendKeybdDown(0x12)
+            if "shift" in mods: self._dll.IbSendKeybdDown(0x10)
+            if key:
+                vk = self._vk_for_key(key)
+                if vk is None and len(key) == 1:
+                    vkshort = self._user32.VkKeyScanW(key)
+                    vk = vkshort & 0xFF if vkshort != -1 else None
+                if vk is not None:
+                    self._dll.IbSendKeybdDown(vk)
+                    self._dll.IbSendKeybdUp(vk)
+                else:
+                    logger.warning(f"Could not resolve virtual key for: {key}")
+            if "shift" in mods: self._dll.IbSendKeybdUp(0x10)
+            if "alt" in mods: self._dll.IbSendKeybdUp(0x12)
+            if "ctrl" in mods: self._dll.IbSendKeybdUp(0x11)
+            if "win" in mods: self._dll.IbSendKeybdUp(0x5B)
+        except Exception as e:
+            logger.error(f"Hotkey '{combo}' failed: {e}")
+
+    def key_down(self, key: str):
+        if not self._ready:
+            logger.warning("DLL backend not ready, skipping key down")
+            return
+        try:
             vk = self._vk_for_key(key)
             if vk is None and len(key) == 1:
                 vkshort = self._user32.VkKeyScanW(key)
                 vk = vkshort & 0xFF if vkshort != -1 else None
-            if vk is not None:
-                self._dll.IbSendKeybdDown(vk)
-                self._dll.IbSendKeybdUp(vk)
-        if "shift" in mods: self._dll.IbSendKeybdUp(0x10)
-        if "alt" in mods: self._dll.IbSendKeybdUp(0x12)
-        if "ctrl" in mods: self._dll.IbSendKeybdUp(0x11)
-        if "win" in mods: self._dll.IbSendKeybdUp(0x5B)
-
-    def key_down(self, key: str):
-        if not self._ready:
-            return
-        vk = self._vk_for_key(key)
-        if vk is None and len(key) == 1:
-            vkshort = self._user32.VkKeyScanW(key)
-            vk = vkshort & 0xFF if vkshort != -1 else None
-        if vk is None:
-            return
-        self._dll.IbSendKeybdDown(int(vk))
+            if vk is None:
+                logger.warning(f"Could not resolve virtual key for key_down: {key}")
+                return
+            self._dll.IbSendKeybdDown(int(vk))
+        except Exception as e:
+            logger.error(f"Key down '{key}' failed: {e}")
 
     def key_up(self, key: str):
         if not self._ready:
+            logger.warning("DLL backend not ready, skipping key up")
             return
-        vk = self._vk_for_key(key)
-        if vk is None and len(key) == 1:
-            vkshort = self._user32.VkKeyScanW(key)
-            vk = vkshort & 0xFF if vkshort != -1 else None
-        if vk is None:
-            return
-        self._dll.IbSendKeybdUp(int(vk))
+        try:
+            vk = self._vk_for_key(key)
+            if vk is None and len(key) == 1:
+                vkshort = self._user32.VkKeyScanW(key)
+                vk = vkshort & 0xFF if vkshort != -1 else None
+            if vk is None:
+                logger.warning(f"Could not resolve virtual key for key_up: {key}")
+                return
+            self._dll.IbSendKeybdUp(int(vk))
+        except Exception as e:
+            logger.error(f"Key up '{key}' failed: {e}")
 
     def scroll(self, wheel_times: int, type: str = "vertical", direction: str = "down"):
         if not self._ready:
